@@ -24,6 +24,7 @@
 
 #include "conntrack.h"
 #include "conntrack-private.h"
+#include "conntrack-shm.h"
 #include "conntrack-tp.h"
 #include "coverage.h"
 #include "crc32c.h"
@@ -156,6 +157,145 @@ static void
 expectation_clean(struct conntrack *ct, const struct conn_key *parent_key);
 
 static struct ct_l4_proto *l4_protos[UINT8_MAX + 1];
+
+static uint64_t
+conntrack_shm_time_ns(void)
+{
+    struct timespec ts;
+
+    xclock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * UINT64_C(1000000000)
+           + (uint64_t) ts.tv_nsec;
+}
+
+static void
+conn_key_to_shm_tuple(const struct conn_key *key,
+                      struct ovs_ct_shm_tuple *tuple)
+{
+    memset(tuple, 0, sizeof *tuple);
+    tuple->ip_proto = key->nw_proto;
+
+    if (key->dl_type == htons(ETH_TYPE_IP)) {
+        tuple->l3_type = AF_INET;
+        memcpy(tuple->src, &key->src.addr.ipv4, 4);
+        memcpy(tuple->dst, &key->dst.addr.ipv4, 4);
+    } else if (key->dl_type == htons(ETH_TYPE_IPV6)) {
+        tuple->l3_type = AF_INET6;
+        memcpy(tuple->src, &key->src.addr.ipv6, 16);
+        memcpy(tuple->dst, &key->dst.addr.ipv6, 16);
+    }
+
+    if (key->nw_proto == IPPROTO_ICMP
+        || key->nw_proto == IPPROTO_ICMPV6) {
+        tuple->icmp_id = key->src.icmp_id;
+        tuple->icmp_type = key->src.icmp_type;
+        tuple->icmp_code = key->src.icmp_code;
+    } else {
+        tuple->src_port = key->src.port;
+        tuple->dst_port = key->dst.port;
+    }
+}
+
+static void
+conntrack_shm_fill_conn(struct ovs_ct_shm_record *rec,
+                        const struct conn *conn,
+                        enum ovs_ct_shm_event event, uint32_t status)
+{
+    const struct conn_key *fwd = &conn->key_node[CT_DIR_FWD].key;
+    const struct conn_key *rev = &conn->key_node[CT_DIR_REV].key;
+    struct ct_l4_proto *class;
+
+    memset(rec, 0, sizeof *rec);
+    rec->magic = OVS_CT_SHM_REC_MAGIC;
+    rec->abi_version = OVS_CT_SHM_VERSION;
+    rec->event = event;
+    rec->rec_flags = OVS_CT_SHM_RF_TIME_MONO;
+    rec->time_ns = conntrack_shm_time_ns();
+    rec->zone = fwd->zone;
+    rec->mark = conn->mark;
+    rec->status = status;
+    rec->labels_lo = conn->label.u64.lo;
+    rec->labels_hi = conn->label.u64.hi;
+    if (rec->labels_lo || rec->labels_hi) {
+        rec->rec_flags |= OVS_CT_SHM_RF_HAVE_LABELS;
+    }
+
+    conn_key_to_shm_tuple(fwd, &rec->tuple_orig);
+    conn_key_to_shm_tuple(rev, &rec->tuple_reply);
+    if (conn->alg_related) {
+        conn_key_to_shm_tuple(&conn->parent_key, &rec->tuple_parent);
+        rec->rec_flags |= OVS_CT_SHM_RF_HAVE_PARENT;
+    }
+    if (conn->alg) {
+        ovs_strzcpy(rec->helper_name, conn->alg, sizeof rec->helper_name);
+        rec->rec_flags |= OVS_CT_SHM_RF_HAVE_HELPER;
+    }
+
+    class = l4_protos[fwd->nw_proto];
+    if (class && class->conn_get_protoinfo) {
+        struct ct_dpif_protoinfo pi;
+
+        memset(&pi, 0, sizeof pi);
+        class->conn_get_protoinfo(conn, &pi);
+        rec->protoinfo.proto = pi.proto;
+        if (pi.proto == IPPROTO_TCP) {
+            rec->protoinfo.tcp.state_orig = pi.tcp.state_orig;
+            rec->protoinfo.tcp.state_reply = pi.tcp.state_reply;
+            rec->protoinfo.tcp.wscale_orig = pi.tcp.wscale_orig;
+            rec->protoinfo.tcp.wscale_reply = pi.tcp.wscale_reply;
+            rec->protoinfo.tcp.flags_orig = pi.tcp.flags_orig;
+            rec->protoinfo.tcp.flags_reply = pi.tcp.flags_reply;
+        } else if (pi.proto == IPPROTO_SCTP) {
+            rec->protoinfo.sctp.state = pi.sctp.state;
+            rec->protoinfo.sctp.vtag_orig = pi.sctp.vtag_orig;
+            rec->protoinfo.sctp.vtag_reply = pi.sctp.vtag_reply;
+        }
+    }
+
+    if (event == OVS_CT_SHM_EV_EXPIRE) {
+        struct timespec ts;
+
+        xclock_gettime(CLOCK_REALTIME, &ts);
+        rec->timestamp.stop_ns = (uint64_t) ts.tv_sec * UINT64_C(1000000000)
+                                 + (uint64_t) ts.tv_nsec;
+    }
+}
+
+static void
+conntrack_shm_log_conn(const struct conn *conn,
+                       enum ovs_ct_shm_event event, uint32_t status)
+{
+    struct ovs_ct_shm_record rec;
+
+    if (OVS_LIKELY(!ovs_ct_shm_enabled) || !conn) {
+        return;
+    }
+    conntrack_shm_fill_conn(&rec, conn, event, status);
+    ovs_ct_shm_emit(&rec);
+}
+
+static void
+conntrack_shm_log_invalid(const struct conn_key *key)
+{
+    struct ovs_ct_shm_record rec;
+
+    if (OVS_LIKELY(!ovs_ct_shm_enabled)) {
+        return;
+    }
+
+    memset(&rec, 0, sizeof rec);
+    rec.magic = OVS_CT_SHM_REC_MAGIC;
+    rec.abi_version = OVS_CT_SHM_VERSION;
+    rec.event = OVS_CT_SHM_EV_INVALID;
+    rec.rec_flags = OVS_CT_SHM_RF_TIME_MONO;
+    rec.time_ns = conntrack_shm_time_ns();
+    rec.status = CS_INVALID;
+    if (key) {
+        rec.zone = key->zone;
+        conn_key_to_shm_tuple(key, &rec.tuple_orig);
+    }
+    ovs_ct_shm_emit(&rec);
+}
 
 static void
 handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
@@ -587,6 +727,9 @@ conn_clean(struct conntrack *ct, struct conn *conn)
     if (atomic_flag_test_and_set(&conn->reclaimed)) {
         return;
     }
+
+    conntrack_shm_log_conn(conn, OVS_CT_SHM_EV_EXPIRE,
+                           CT_DPIF_STATUS_DYING);
 
     ovs_mutex_lock(&ct->ct_lock);
     conn_clean__(ct, conn);
@@ -1033,6 +1176,7 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
 
     if (!valid_new(pkt, &ctx->key)) {
         pkt->md.ct_state = CS_INVALID;
+        conntrack_shm_log_invalid(&ctx->key);
         return nc;
     }
 
@@ -1129,6 +1273,8 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
         }
 
         ctx->conn = nc; /* For completeness. */
+
+        conntrack_shm_log_conn(nc, OVS_CT_SHM_EV_NEW, pkt->md.ct_state);
     }
 
     return nc;
@@ -1172,9 +1318,12 @@ conn_update_state(struct conntrack *ct, struct dp_packet *pkt,
             if (ctx->reply) {
                 pkt->md.ct_state |= CS_REPLY_DIR;
             }
+            conntrack_shm_log_conn(conn, OVS_CT_SHM_EV_UPDATE,
+                                   pkt->md.ct_state);
             break;
         case CT_UPDATE_INVALID:
             pkt->md.ct_state = CS_INVALID;
+            conntrack_shm_log_invalid(&ctx->key);
             break;
         case CT_UPDATE_NEW:
             if (conn_lookup(ct, &conn->key_node[CT_DIR_FWD].key,
@@ -1185,6 +1334,8 @@ conn_update_state(struct conntrack *ct, struct dp_packet *pkt,
             break;
         case CT_UPDATE_VALID_NEW:
             pkt->md.ct_state |= CS_NEW;
+            conntrack_shm_log_conn(conn, OVS_CT_SHM_EV_UPDATE,
+                                   pkt->md.ct_state);
             break;
         default:
             OVS_NOT_REACHED();
@@ -1420,6 +1571,7 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
             /* An icmp related conn should always be found; no new
                connection is created based on an icmp related packet. */
             pkt->md.ct_state = CS_INVALID;
+            conntrack_shm_log_invalid(&ctx->key);
         } else {
             create_new_conn = true;
         }
@@ -1505,6 +1657,7 @@ conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
 
         if (OVS_UNLIKELY(packet->md.ct_state == CS_INVALID)) {
             write_ct_md(packet, zone, NULL, NULL, NULL);
+            conntrack_shm_log_invalid(NULL);
         } else if (conn &&
                    conn->key_node[CT_DIR_FWD].key.zone == zone && !force &&
                    !get_alg_ctl_type(packet, helper)) {
@@ -1514,6 +1667,7 @@ conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
                                 zone))) {
             packet->md.ct_state = CS_INVALID;
             write_ct_md(packet, zone, NULL, NULL, NULL);
+            conntrack_shm_log_invalid(&ctx.key);
         } else {
             process_one(ct, packet, &ctx, zone, force, commit, now, setmark,
                         setlabel, nat_action_info, helper, tp_id);
@@ -1657,6 +1811,8 @@ clean_thread_main(void *f_)
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     struct conntrack *ct = f_;
+
+    ovs_ct_shm_thread_role_set(OVS_CT_SHM_ROLE_CT_CLEAN);
 
     while (!latch_is_set(&ct->clean_thread_exit)) {
         long long next_wake;
