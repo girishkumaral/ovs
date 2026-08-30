@@ -1,5 +1,10 @@
 Post-v4.0.0
 --------------------
+   - Userspace datapath:
+     * Optional POSIX shared-memory conntrack event log (NEW / UPDATE /
+       EXPIRE / INVALID), off by default.  Enable with
+       other_config:ct-shm-enable.  Independent readers map
+       $OVS_RUNDIR/ovs-ct-shm (typically /var/run/openvswitch/ovs-ct-shm).
 
 
 v4.0.0 - 17 Aug 2026
