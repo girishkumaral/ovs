@@ -1,6 +1,7 @@
 openvswitchincludedir = $(includedir)/openvswitch
 openvswitchinclude_HEADERS = \
 	include/openvswitch/compiler.h \
+	include/openvswitch/ct-shm.h \
 	include/openvswitch/dynamic-string.h \
 	include/openvswitch/hmap.h \
 	include/openvswitch/flow.h \
