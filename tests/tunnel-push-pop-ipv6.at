@@ -656,6 +656,54 @@ AT_CHECK([ovs-appctl tnl/arp/show | tail -n+3 | sort], [0], [dnl
 2001:cafe::93                                 f8:bc:12:44:34:b7   br0
 ])
 
+dnl Disable data-packet neigh snoop on t2 only.  A different outer MAC
+dnl on that Interface must not replace the complete tnl-neigh entry.
+AT_CHECK([ovs-vsctl set Interface t2 options:neigh_snoop=false])
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'aa55aa550000f8bc1244cafe86dd60000000003a11402001cafe0000000000000000000000922001cafe000000000000000000000088c85312b5003abc700c00000300007b00ffffffffffff00000000000008004500001c0001000040117cce7f0000017f0000010035003500080172'])
+
+ovs-appctl time/warp 1000
+ovs-appctl time/warp 1000
+
+AT_CHECK([ovs-appctl tnl/arp/show | tail -n+3 | sort], [0], [dnl
+2001:cafe::92                                 f8:bc:12:44:34:b6   br0
+2001:cafe::93                                 f8:bc:12:44:34:b7   br0
+])
+
+dnl t3 stays default-on.  A data packet for 2001:cafe::93 must still update.
+dnl Use a different outer MAC so this misses the t2 megaflow and re-xlates.
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'aa55aa550000f8bc1244caff86dd60000000003a11402001cafe0000000000000000000000932001cafe000000000000000000000088c85312b5003abc700c00000300000000ffffffffffff00000000000008004500001c0001000040117cce7f0000017f0000010035003500080172'])
+
+ovs-appctl time/warp 1000
+ovs-appctl time/warp 1000
+
+AT_CHECK([ovs-appctl tnl/arp/show | tail -n+3 | sort], [0], [dnl
+2001:cafe::92                                 f8:bc:12:44:34:b6   br0
+2001:cafe::93                                 f8:bc:12:44:ca:ff   br0
+])
+
+dnl ND snooping still updates the cache when neigh_snoop is false.
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'in_port(1),eth(src=f8:bc:12:44:ca:fe,dst=aa:55:aa:55:00:00),eth_type(0x86dd),ipv6(src=2001:cafe::92,dst=2001:cafe::88,label=0,proto=58,tclass=0,hlimit=255,frag=no),icmpv6(type=136,code=0),nd(target=2001:cafe::92,sll=00:00:00:00:00:00,tll=f8:bc:12:44:ca:fe)'])
+
+ovs-appctl time/warp 1000
+ovs-appctl time/warp 1000
+
+AT_CHECK([ovs-appctl tnl/arp/show | tail -n+3 | sort], [0], [dnl
+2001:cafe::92                                 f8:bc:12:44:ca:fe   br0
+2001:cafe::93                                 f8:bc:12:44:ca:ff   br0
+])
+
+dnl Restore the complete entries used by later push checks.
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'in_port(1),eth(src=f8:bc:12:44:34:b6,dst=aa:55:aa:55:00:00),eth_type(0x86dd),ipv6(src=2001:cafe::92,dst=2001:cafe::88,label=0,proto=58,tclass=0,hlimit=255,frag=no),icmpv6(type=136,code=0),nd(target=2001:cafe::92,sll=00:00:00:00:00:00,tll=f8:bc:12:44:34:b6)'])
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'in_port(1),eth(src=f8:bc:12:44:34:b7,dst=aa:55:aa:55:00:00),eth_type(0x86dd),ipv6(src=2001:cafe::93,dst=2001:cafe::88,label=0,proto=58,tclass=0,hlimit=255,frag=no),icmpv6(type=136,code=0),nd(target=2001:cafe::93,sll=00:00:00:00:00:00,tll=f8:bc:12:44:34:b7)'])
+
+ovs-appctl time/warp 1000
+ovs-appctl time/warp 1000
+
+AT_CHECK([ovs-appctl tnl/arp/show | tail -n+3 | sort], [0], [dnl
+2001:cafe::92                                 f8:bc:12:44:34:b6   br0
+2001:cafe::93                                 f8:bc:12:44:34:b7   br0
+])
+
 dnl Disable checksum from VXLAN port.
 AT_CHECK([ovs-vsctl set Interface t3 options:csum=false])
 AT_CHECK([ovs-ofctl del-flows int-br])

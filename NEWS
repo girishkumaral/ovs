@@ -1,5 +1,11 @@
 Post-v4.0.0
 --------------------
+   - Userspace datapath:
+     * Native tunnels accept a per-tunnel Interface 'neigh_snoop' option
+       (default true).  Setting 'options:neigh_snoop=false' skips updating
+       the tunnel neighbor cache from the outer source MAC of encapsulated
+       data packets on that Interface.  Userspace native tunneling only.
+       ARP/ND snooping is unchanged.
 
 
 v4.0.0 - 17 Aug 2026

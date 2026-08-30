@@ -53,6 +53,7 @@ struct tnl_port {
     struct ovs_refcount ref_cnt;
     ovs_be16 tp_port;
     uint8_t nw_proto;
+    const char *type;
     char dev_name[IFNAMSIZ];
     struct ovs_list node;
 };
@@ -180,7 +181,8 @@ tnl_type_to_nw_proto(const char type[], uint8_t nw_protos[2])
 
 static void
 tnl_port_map_insert__(odp_port_t port, ovs_be16 tp_port,
-                      const char dev_name[], uint8_t nw_proto)
+                      const char dev_name[], uint8_t nw_proto,
+                      const char type[])
 {
     struct tnl_port *p;
     struct ip_device *ip_dev;
@@ -197,6 +199,7 @@ tnl_port_map_insert__(odp_port_t port, ovs_be16 tp_port,
     p->port = port;
     p->tp_port = tp_port;
     p->nw_proto = nw_proto;
+    p->type = type;
     ovs_strlcpy(p->dev_name, dev_name, sizeof p->dev_name);
     ovs_refcount_init(&p->ref_cnt);
     ovs_list_insert(&port_list, &p->node);
@@ -220,7 +223,8 @@ tnl_port_map_insert(odp_port_t port, ovs_be16 tp_port,
 
     for (i = 0; i < 2; i++) {
         if (nw_protos[i]) {
-            tnl_port_map_insert__(port, tp_port, dev_name, nw_protos[i]);
+            tnl_port_map_insert__(port, tp_port, dev_name, nw_protos[i],
+                                  type);
         }
     }
 }
@@ -306,6 +310,25 @@ tnl_port_map_lookup(struct flow *flow, struct flow_wildcards *wc)
                                                   wc, NULL);
 
     return (cr) ? tnl_port_cast(cr)->portno : ODPP_NONE;
+}
+
+/* Returns the native vport type ("vxlan", "geneve", "gtpu", ...) for
+ * 'port', or NULL if 'port' is not in the map. */
+const char *
+tnl_port_map_get_type(odp_port_t port)
+{
+    const char *type = NULL;
+    struct tnl_port *p;
+
+    ovs_mutex_lock(&mutex);
+    LIST_FOR_EACH (p, node, &port_list) {
+        if (p->port == port) {
+            type = p->type;
+            break;
+        }
+    }
+    ovs_mutex_unlock(&mutex);
+    return type;
 }
 
 static void

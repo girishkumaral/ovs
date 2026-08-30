@@ -335,6 +335,42 @@ out:
     return ofport;
 }
 
+/* Like tnl_port_receive(), but 'flow' still has the outer headers from the
+ * physical port.  'tnl_odp_port' is the shared native vport from
+ * tnl_port_map_lookup() and 'tun_id' is the encapsulation key. */
+const struct ofport_dpif *
+tnl_port_receive_native(const struct flow *flow, odp_port_t tnl_odp_port,
+                        ovs_be64 tun_id) OVS_EXCLUDED(rwlock)
+{
+    const struct ofport_dpif *ofport = NULL;
+    struct tnl_port *tnl_port;
+    struct flow recv_flow;
+
+    memset(&recv_flow, 0, sizeof recv_flow);
+    recv_flow.packet_type = flow->packet_type;
+    recv_flow.in_port.odp_port = tnl_odp_port;
+    recv_flow.tunnel.tun_id = tun_id;
+    recv_flow.tunnel.flags = FLOW_TNL_F_KEY;
+
+    if (flow->dl_type == htons(ETH_TYPE_IP)) {
+        recv_flow.tunnel.ip_src = flow->nw_src;
+        recv_flow.tunnel.ip_dst = flow->nw_dst;
+    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+        recv_flow.tunnel.ipv6_src = flow->ipv6_src;
+        recv_flow.tunnel.ipv6_dst = flow->ipv6_dst;
+    } else {
+        return NULL;
+    }
+
+    fat_rwlock_rdlock(&rwlock);
+    tnl_port = tnl_find(&recv_flow);
+    if (tnl_port) {
+        ofport = tnl_port->ofport;
+    }
+    fat_rwlock_unlock(&rwlock);
+    return ofport;
+}
+
 /* Should be called at the beginning of action translation to initialize
  * wildcards and perform any actions based on receiving on tunnel port.
  *

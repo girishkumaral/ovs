@@ -228,6 +228,7 @@ netdev_vport_construct(struct netdev *netdev_)
     }
 
     tnl_cfg->dont_fragment = true;
+    tnl_cfg->neigh_snoop = true;
     tnl_cfg->ttl = DEFAULT_TTL;
 
     ovsrcu_set(&dev->tnl_cfg, tnl_cfg);
@@ -638,6 +639,7 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args, char **errp)
 
     needs_dst_port = netdev_vport_needs_dst_port(dev_);
     tnl_cfg.dont_fragment = true;
+    tnl_cfg.neigh_snoop = true;
 
     SMAP_FOR_EACH (node, args) {
         if (!strcmp(node->key, "remote_ip")) {
@@ -696,6 +698,10 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args, char **errp)
         } else if (!strcmp(node->key, "df_default")) {
             if (!strcmp(node->value, "false")) {
                 tnl_cfg.dont_fragment = false;
+            }
+        } else if (!strcmp(node->key, "neigh_snoop")) {
+            if (!strcmp(node->value, "false")) {
+                tnl_cfg.neigh_snoop = false;
             }
         } else if (!strcmp(node->key, "key") ||
                    !strcmp(node->key, "in_key") ||
@@ -1043,6 +1049,10 @@ get_tunnel_config(const struct netdev *dev, struct smap *args)
 
     if (!tnl_cfg->dont_fragment) {
         smap_add(args, "df_default", "false");
+    }
+
+    if (!tnl_cfg->neigh_snoop) {
+        smap_add(args, "neigh_snoop", "false");
     }
 
     if (tnl_cfg->set_egress_pkt_mark) {

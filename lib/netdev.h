@@ -159,6 +159,7 @@ struct netdev_tunnel_config {
 
     enum netdev_tnl_csum csum;
     bool dont_fragment;
+    bool neigh_snoop;
     enum netdev_pt_mode pt_mode;
 
     bool set_seq;
