@@ -24,6 +24,7 @@
 #include "bitmap.h"
 #include "cfm.h"
 #include "connectivity.h"
+#include "conntrack-shm.h"
 #include "coverage.h"
 #include "daemon.h"
 #include "dirs.h"
@@ -893,6 +894,8 @@ bridge_reconfigure(const struct ovsrec_open_vswitch *ovs_cfg)
     ofproto_set_explicit_sampled_drops(
         smap_get_bool(&ovs_cfg->other_config, "explicit-sampled-drops",
                       OFPROTO_EXPLICIT_SAMPLED_DROPS_DEFAULT));
+
+    ovs_ct_shm_apply_other_config(&ovs_cfg->other_config);
 
     /* Destroy "struct bridge"s, "struct port"s, and "struct iface"s according
      * to 'ovs_cfg', with only very minimal configuration otherwise.

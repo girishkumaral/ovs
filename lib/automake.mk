@@ -52,6 +52,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/conntrack-tp.c \
 	lib/conntrack-tp.h \
 	lib/conntrack-other.c \
+	lib/conntrack-shm.c \
+	lib/conntrack-shm.h \
 	lib/conntrack.c \
 	lib/conntrack.h \
 	lib/cooperative-multitasking.c \

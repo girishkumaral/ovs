@@ -289,6 +289,67 @@
         </p>
       </column>
 
+      <column name="other_config" key="ct-shm-enable"
+              type='{"type": "boolean"}'>
+        <p>
+          Set this value to <code>true</code> to enable userspace conntrack
+          event logging over a file-backed POSIX shared mapping at
+          <code>$OVS_RUNDIR/ovs-ct-shm</code> (typically
+          <code>/var/run/openvswitch/ovs-ct-shm</code>).  An independent
+          reader can consume NEW, UPDATE, EXPIRE, and INVALID events
+          without stalling a PMD: the producer fills a pre-mapped record,
+          issues one fence, and stores <code>write_idx</code>.
+        </p>
+        <p>
+          The default value is <code>false</code>.  When disabled, no
+          mapping is created and the userspace conntrack hot path is a
+          single predictable false branch.  The backing file is not
+          unlinked if <code>ovs-vswitchd</code> crashes, so a postmortem
+          reader can still map it.
+        </p>
+      </column>
+
+      <column name="other_config" key="ct-shm-n-rings"
+              type='{"type": "integer", "minInteger": 1, "maxInteger": 1024}'>
+        <p>
+          Number of per-writer-thread rings in the conntrack SHM log.
+          Must cover every thread that can emit events: PMD threads
+          (NEW/UPDATE/INVALID), the <code>ct_clean</code> thread
+          (EXPIRE), and other non-PMD writers (ROLE_OTHER).  Threads
+          that cannot claim a ring silently skip emission.
+        </p>
+        <p>
+          The default is 16.  Only used when
+          <ref column="other_config" key="ct-shm-enable"/> is true.
+        </p>
+      </column>
+
+      <column name="other_config" key="ct-shm-ring-capacity"
+              type='{"type": "integer", "minInteger": 1}'>
+        <p>
+          Number of 320-byte records per ring.  Must be a power of two.
+          The producer always writes and overwrites the oldest slot when
+          a reader is behind; there is no shared read index.
+        </p>
+        <p>
+          The default is 65536.  Only used when
+          <ref column="other_config" key="ct-shm-enable"/> is true.
+        </p>
+      </column>
+
+      <column name="other_config" key="ct-shm-event-mask"
+              type='{"type": "integer", "minInteger": 0, "maxInteger": 15}'>
+        <p>
+          Bitmask of conntrack SHM event types to emit:
+          bit 0 NEW, bit 1 UPDATE, bit 2 EXPIRE, bit 3 INVALID.
+          The live mask is also stored in the 4K mapping header.
+        </p>
+        <p>
+          The default is 15 (all types).  Only used when
+          <ref column="other_config" key="ct-shm-enable"/> is true.
+        </p>
+      </column>
+
       <column name="other_config" key="tc-policy"
               type='{"type": "string",
                      "enum": ["set", ["none", "skip_sw", "skip_hw"]]}'>

@@ -36,6 +36,7 @@
 #include "ccmap.h"
 #include "cmap.h"
 #include "conntrack.h"
+#include "conntrack-shm.h"
 #include "conntrack-tp.h"
 #include "coverage.h"
 #include "ct-dpif.h"
@@ -3890,6 +3891,8 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
 {
     struct dp_netdev *dp = get_dp_netdev(dpif);
     const char *cmask = smap_get(other_config, "pmd-cpu-mask");
+
+    ovs_ct_shm_apply_other_config(other_config);
     const char *pmd_rxq_assign = smap_get_def(other_config, "pmd-rxq-assign",
                                              "cycles");
     unsigned long long insert_prob =
@@ -6070,6 +6073,7 @@ pmd_thread_main(void *f_)
 
     /* Stores the pmd thread's 'pmd' to 'per_pmd_key'. */
     ovsthread_setspecific(pmd->dp->per_pmd_key, pmd);
+    ovs_ct_shm_thread_role_set(OVS_CT_SHM_ROLE_PMD);
     ovs_numa_thread_setaffinity_core(pmd->core_id);
     dpdk_attached = dpdk_attach_thread(pmd->core_id);
     poll_cnt = pmd_load_queues_and_ports(pmd, &poll_list);
