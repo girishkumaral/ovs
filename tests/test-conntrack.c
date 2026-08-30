@@ -17,15 +17,25 @@
 #include <config.h>
 #include "conntrack.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "conntrack-shm.h"
+#include "dirs.h"
 #include "dp-packet.h"
 #include "fatal-signal.h"
 #include "flow.h"
 #include "netdev.h"
+#include "openvswitch/ct-shm.h"
 #include "ovs-thread.h"
 #include "ovstest.h"
 #include "pcap-file.h"
 #include "timeval.h"
 #include "stopwatch.h"
+#include "util.h"
 
 #define STOPWATCH_CT_EXECUTE_COMMIT "ct-execute-commit"
 #define STOPWATCH_CT_EXECUTE_NO_COMMIT "ct-execute-no-commit"
@@ -496,7 +506,159 @@ test_pcap(struct ovs_cmdl_context *ctx)
     ovs_pcap_close(pcap);
 }
 
-/* ALG related testing. */
+/* Conntrack SHM log tests. */
+
+static void
+ct_shm_execute_udp(struct conntrack *ct_, uint16_t src, uint16_t dst,
+                   bool commit)
+{
+    ovs_be16 dl_type;
+    struct dp_packet *pkt = build_packet(src, dst, &dl_type);
+    struct dp_packet_batch batch;
+    long long now = time_msec();
+
+    dp_packet_batch_init_packet(&batch, pkt);
+    conntrack_execute(ct_, &batch, dl_type, false, commit, 0, NULL, NULL,
+                      NULL, NULL, now, 0);
+    dp_packet_delete_batch(&batch, true);
+}
+
+static const struct ovs_ct_shm_hdr *
+ct_shm_map_reader(int *fdp, size_t *sizep)
+{
+    const char *path = ovs_ct_shm_path();
+    struct ovs_ct_shm_hdr *hdr4k;
+    struct ovs_ct_shm_hdr *full;
+    size_t map_size;
+    int fd;
+
+    ovs_assert(path);
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        ovs_fatal(0, "open %s: %s", path, ovs_strerror(errno));
+    }
+
+    hdr4k = mmap(NULL, OVS_CT_SHM_HDR_SIZE, PROT_READ, MAP_SHARED, fd, 0);
+    if (hdr4k == MAP_FAILED) {
+        ovs_fatal(0, "mmap 4K header: %s", ovs_strerror(errno));
+    }
+    if (hdr4k->magic != OVS_CT_SHM_MAGIC
+        || hdr4k->version != OVS_CT_SHM_VERSION
+        || hdr4k->hdr_size != OVS_CT_SHM_HDR_SIZE
+        || hdr4k->record_size != OVS_CT_SHM_RECORD_SIZE) {
+        ovs_fatal(0, "unexpected SHM header magic/version/sizes");
+    }
+
+    map_size = ovs_ct_shm_map_size(hdr4k);
+    munmap(hdr4k, OVS_CT_SHM_HDR_SIZE);
+
+    full = mmap(NULL, map_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (full == MAP_FAILED) {
+        ovs_fatal(0, "mmap full segment: %s", ovs_strerror(errno));
+    }
+    *fdp = fd;
+    *sizep = map_size;
+    return full;
+}
+
+static unsigned
+ct_shm_count_event(const struct ovs_ct_shm_hdr *h, uint16_t event)
+{
+    const uint8_t *base = (const uint8_t *) h;
+    unsigned n = 0;
+    uint32_t r;
+
+    for (r = 0; r < h->n_rings; r++) {
+        const struct ovs_ct_shm_ring *ring;
+        uint64_t w;
+        uint64_t s;
+
+        ring = ALIGNED_CAST(const struct ovs_ct_shm_ring *,
+                            base + ovs_ct_shm_ring_offset(h, r));
+        w = ring->write_idx;
+        for (s = 0; s < w && s < h->ring_capacity; s++) {
+            const struct ovs_ct_shm_record *rec;
+
+            rec = ALIGNED_CAST(const struct ovs_ct_shm_record *,
+                               base + ovs_ct_shm_record_offset(h, r, s));
+            if (rec->magic == OVS_CT_SHM_REC_MAGIC
+                && rec->event == event) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static void
+test_shm_abi(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    ovs_assert(sizeof(struct ovs_ct_shm_hdr) == 4096);
+    ovs_assert(sizeof(struct ovs_ct_shm_record) == 320);
+    ovs_assert(sizeof(struct ovs_ct_shm_ring) == 128);
+    ovs_assert(sizeof(struct ovs_ct_shm_tuple) == 40);
+}
+
+static void
+test_shm_disabled(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    const char *path;
+    struct stat st;
+
+    fatal_signal_init();
+    ovs_assert(!ovs_ct_shm_is_enabled());
+
+    ct = conntrack_init();
+    ct_shm_execute_udp(ct, 1, 2, true);
+    conntrack_destroy(ct);
+    ct = NULL;
+
+    path = ovs_ct_shm_path();
+    ovs_assert(path);
+    if (stat(path, &st) == 0) {
+        ovs_fatal(0, "SHM file %s exists while logging is disabled", path);
+    }
+    ovs_assert(errno == ENOENT);
+}
+
+static void
+test_shm_new_expire(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    const struct ovs_ct_shm_hdr *hdr;
+    size_t map_size;
+    int fd;
+    unsigned n_new;
+    unsigned n_expire;
+
+    fatal_signal_init();
+
+    if (ovs_ct_shm_set_config(true, 4, 64, OVS_CT_SHM_MASK_ALL)) {
+        ovs_fatal(0, "failed to enable conntrack SHM log");
+    }
+    ovs_assert(ovs_ct_shm_is_enabled());
+
+    ct = conntrack_init();
+    ct_shm_execute_udp(ct, 10, 20, true);
+
+    hdr = ct_shm_map_reader(&fd, &map_size);
+    n_new = ct_shm_count_event(hdr, OVS_CT_SHM_EV_NEW);
+    if (n_new < 1) {
+        ovs_fatal(0, "expected at least one NEW event, got %u", n_new);
+    }
+
+    conntrack_flush(ct, NULL);
+    n_expire = ct_shm_count_event(hdr, OVS_CT_SHM_EV_EXPIRE);
+    if (n_expire < 1) {
+        ovs_fatal(0, "expected at least one EXPIRE event, got %u", n_expire);
+    }
+
+    munmap(CONST_CAST(void *, hdr), map_size);
+    close(fd);
+    conntrack_destroy(ct);
+    ct = NULL;
+    ovs_ct_shm_set_config(false, 0, 0, 0);
+}
+
 
 /* FTP IPv4 PORT payload for testing. */
 #define FTP_PORT_CMD_STR  "PORT 192,168,123,2,113,42\r\n"
@@ -601,6 +763,9 @@ static const struct ovs_cmdl_command commands[] = {
      * is rewritten to the SNAT target rather than causing a crash. */
     {"ftp-alg-large-payload", "", 0, 0,
         test_ftp_alg_large_payload, OVS_RO},
+    {"shm-abi", "", 0, 0, test_shm_abi, OVS_RO},
+    {"shm-disabled", "", 0, 0, test_shm_disabled, OVS_RO},
+    {"shm-new-expire", "", 0, 0, test_shm_new_expire, OVS_RO},
 
     {NULL, NULL, 0, 0, NULL, OVS_RO},
 };

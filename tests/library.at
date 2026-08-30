@@ -296,3 +296,15 @@ AT_CLEANUP
 AT_SETUP([Conntrack Library - FTP ALG parsing])
 AT_CHECK([ovstest test-conntrack ftp-alg-large-payload])
 AT_CLEANUP
+
+AT_SETUP([Conntrack Library - SHM log ABI sizes])
+AT_CHECK([ovstest test-conntrack shm-abi])
+AT_CLEANUP
+
+AT_SETUP([Conntrack Library - SHM log disabled])
+AT_CHECK([ovstest test-conntrack shm-disabled])
+AT_CLEANUP
+
+AT_SETUP([Conntrack Library - SHM log NEW and EXPIRE])
+AT_CHECK([ovstest test-conntrack shm-new-expire], [0], [], [ignore])
+AT_CLEANUP
