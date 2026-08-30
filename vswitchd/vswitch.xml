@@ -3102,6 +3102,19 @@
         to <code>false</code> to disable.
       </column>
 
+      <column name="options" key="neigh_snoop"
+              type='{"type": "boolean"}'>
+        Optional.  Userspace native tunneling only.  If enabled (the
+        default), the userspace datapath updates the native-tunnel neighbor
+        cache from the outer Ethernet source MAC of encapsulated IPv4 and
+        IPv6 data packets received on this tunnel Interface.  That lets
+        BFD recover after the remote VTEP NIC MAC changes.  Set to
+        <code>false</code> to skip that data-packet snooping, which can
+        otherwise flap the neighbor entry when ECMP or MLAG changes the
+        last-hop MAC.  ARP, GARP, and Neighbor Discovery snooping is not
+        affected.
+      </column>
+
       <column name="options" key="egress_pkt_mark">
         Optional.  The pkt_mark to be set on the encapsulating packet.  This
         option sets packet mark for the tunnel endpoint for all tunnel packets

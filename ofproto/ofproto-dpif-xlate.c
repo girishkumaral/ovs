@@ -4435,6 +4435,119 @@ static bool check_neighbor_reply(struct xlate_ctx *ctx, struct flow *flow)
     return false;
 }
 
+/* Encapsulation key from a native-tunnel packet still on the phy port.
+ * 'type' is the native vport type for tnl_odp_port (vxlan, geneve, gtpu).
+ * Geneve stores the VNI in the same 4 bytes as VXLAN; GTP does not.
+ * GRE uses the optional key.  Returns 0 if the type is unknown or the
+ * key is absent. */
+static ovs_be64
+native_tnl_recv_key(const struct dp_packet *packet, const struct flow *flow,
+                    const char *type)
+{
+    const void *l4;
+    size_t l4_size;
+
+    if (!packet) {
+        return 0;
+    }
+
+    l4 = dp_packet_l4(packet);
+    if (!l4) {
+        return 0;
+    }
+    l4_size = dp_packet_l4_size(packet);
+
+    if (flow->nw_proto == IPPROTO_UDP) {
+        if (!type) {
+            return 0;
+        }
+
+        if (!strcmp(type, "vxlan")) {
+            const struct vxlanhdr *vxh;
+
+            if (l4_size < UDP_HEADER_LEN + sizeof *vxh) {
+                return 0;
+            }
+            vxh = ALIGNED_CAST(const struct vxlanhdr *,
+                               (const char *) l4 + UDP_HEADER_LEN);
+            return htonll(ntohl(get_16aligned_be32(&vxh->vx_vni)) >> 8);
+        }
+
+        if (!strcmp(type, "geneve")) {
+            const struct genevehdr *gnh;
+
+            if (l4_size < UDP_HEADER_LEN + sizeof *gnh) {
+                return 0;
+            }
+            gnh = ALIGNED_CAST(const struct genevehdr *,
+                               (const char *) l4 + UDP_HEADER_LEN);
+            return htonll(ntohl(get_16aligned_be32(&gnh->vni)) >> 8);
+        }
+
+        if (!strcmp(type, "gtpu")) {
+            const struct gtpuhdr *gtph;
+
+            if (l4_size < UDP_HEADER_LEN + sizeof *gtph) {
+                return 0;
+            }
+            gtph = ALIGNED_CAST(const struct gtpuhdr *,
+                                (const char *) l4 + UDP_HEADER_LEN);
+            return be32_to_be64(get_16aligned_be32(&gtph->teid));
+        }
+
+        return 0;
+    }
+
+    if (flow->nw_proto == IPPROTO_GRE) {
+        const struct gre_base_hdr *greh = l4;
+        const ovs_16aligned_be32 *options;
+        size_t hlen = sizeof *greh;
+
+        if (l4_size < hlen) {
+            return 0;
+        }
+        if (greh->flags & htons(GRE_CSUM)) {
+            hlen += 4;
+        }
+        if (!(greh->flags & htons(GRE_KEY))) {
+            return 0;
+        }
+        hlen += 4;
+        if (l4_size < hlen) {
+            return 0;
+        }
+        options = ALIGNED_CAST(const ovs_16aligned_be32 *,
+                               (const char *) greh + hlen - 4);
+        return be32_to_be64(get_16aligned_be32(options));
+    }
+
+    return 0;
+}
+
+/* options:neigh_snoop from the OpenFlow tunnel port that receive matching
+ * would select for this packet.  Default on. */
+static bool
+native_tnl_neigh_snoop(const struct xlate_ctx *ctx, const struct flow *flow,
+                       odp_port_t tnl_odp_port)
+{
+    const struct netdev_tunnel_config *cfg;
+    const struct ofport_dpif *ofport;
+    const struct xport *xport;
+    const char *type;
+    ovs_be64 tun_id;
+
+    type = tnl_port_map_get_type(tnl_odp_port);
+    tun_id = native_tnl_recv_key(ctx->xin->packet, flow, type);
+    ofport = tnl_port_receive_native(flow, tnl_odp_port, tun_id);
+    xport = xport_lookup(ctx->xcfg, ofport);
+    if (!xport || !xport->netdev) {
+        return true;
+    }
+
+    cfg = netdev_get_tunnel_config(xport->netdev);
+    return !cfg || cfg->neigh_snoop;
+}
+
 static bool
 terminate_native_tunnel(struct xlate_ctx *ctx, const struct xport *xport,
                         struct flow *flow, struct flow_wildcards *wc,
@@ -4460,7 +4573,8 @@ terminate_native_tunnel(struct xlate_ctx *ctx, const struct xport *xport,
                             ctx->xin->allow_side_effects);
         } else if (*tnl_port != ODPP_NONE &&
                    ctx->xin->allow_side_effects &&
-                   dl_type_is_ip_any(flow->dl_type)) {
+                   dl_type_is_ip_any(flow->dl_type) &&
+                   native_tnl_neigh_snoop(ctx, flow, *tnl_port)) {
             struct eth_addr mac = flow->dl_src;
             struct in6_addr s_ip6;
 

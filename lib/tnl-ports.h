@@ -25,6 +25,7 @@
 #include "util.h"
 
 odp_port_t tnl_port_map_lookup(struct flow *flow, struct flow_wildcards *wc);
+const char *tnl_port_map_get_type(odp_port_t);
 
 void tnl_port_map_insert(odp_port_t, ovs_be16 tp_port,
                          const char dev_name[], const char type[]);
