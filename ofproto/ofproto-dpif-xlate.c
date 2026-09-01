@@ -4435,6 +4435,55 @@ static bool check_neighbor_reply(struct xlate_ctx *ctx, struct flow *flow)
     return false;
 }
 
+/* Map a router output device name to the xbridge that owns it.
+ * ovs_router_lookup() may return a bridge name or a member port name
+ * (system-route fallback).  Walk xports, the same resolution
+ * tnl_route_lookup_flow() uses after the bridge-name match. */
+static const struct xbridge *
+xbridge_from_dev_name(const struct xlate_ctx *ctx, const char *dev_name)
+{
+    struct xbridge *xbridge;
+    struct xport *port;
+
+    HMAP_FOR_EACH (xbridge, hmap_node, &ctx->xcfg->xbridges) {
+        HMAP_FOR_EACH (port, ofp_node, &xbridge->xports) {
+            if (!strncmp(netdev_get_name(port->netdev),
+                         dev_name, IFNAMSIZ)) {
+                return xbridge;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* True if the underlay route for remote 'ip' is on-link through the
+ * receiving bridge.  'src' is the outer destination (local VTEP), the
+ * return-path source for policy routing; never NULL.  Failed lookup,
+ * a next-hop gateway, or an output device owned by another xbridge
+ * is not on-link.  IPv4 stores a missing gateway as ::ffff:0.0.0.0,
+ * which ipv6_addr_is_set() treats as set; treat that as no gateway. */
+static bool
+is_onlink(const struct xlate_ctx *ctx, uint32_t mark,
+          const struct in6_addr *ip, const struct in6_addr *src)
+{
+    const struct xbridge *out_xbridge;
+    struct in6_addr src6 = *src;
+    char out_dev[IFNAMSIZ];
+    struct in6_addr gw;
+
+    if (!ovs_router_lookup(mark, ip, out_dev, &src6, &gw)) {
+        return false;
+    }
+
+    if (ipv6_addr_is_set(&gw)
+        && (!IN6_IS_ADDR_V4MAPPED(&gw) || in6_addr_get_mapped_ipv4(&gw))) {
+        return false;
+    }
+
+    out_xbridge = xbridge_from_dev_name(ctx, out_dev);
+    return out_xbridge == ctx->xbridge;
+}
+
 static bool
 terminate_native_tunnel(struct xlate_ctx *ctx, const struct xport *xport,
                         struct flow *flow, struct flow_wildcards *wc,
@@ -4461,16 +4510,25 @@ terminate_native_tunnel(struct xlate_ctx *ctx, const struct xport *xport,
         } else if (*tnl_port != ODPP_NONE &&
                    ctx->xin->allow_side_effects &&
                    dl_type_is_ip_any(flow->dl_type)) {
-            struct eth_addr mac = flow->dl_src;
-            struct in6_addr s_ip6;
+            struct in6_addr s_ip6, d_ip6;
 
             if (flow->dl_type == htons(ETH_TYPE_IP)) {
                 in6_addr_set_mapped_ipv4(&s_ip6, flow->nw_src);
+                in6_addr_set_mapped_ipv4(&d_ip6, flow->nw_dst);
             } else {
                 s_ip6 = flow->ipv6_src;
+                d_ip6 = flow->ipv6_dst;
             }
 
-            tnl_neigh_set(ctx->xbridge->name, &s_ip6, mac);
+            /* Learn the outer Ethernet source only when the remote is
+             * on-link through this bridge.  A routed last hop is a
+             * router/MLAG MAC; a remote on-link on another bridge is
+             * not this bridge's neighbor.  Either would flap
+             * tnl_conf_seq.  A failed route lookup does not snoop.
+             * ARP/ND snooping above is unchanged. */
+            if (is_onlink(ctx, flow->pkt_mark, &s_ip6, &d_ip6)) {
+                tnl_neigh_set(ctx->xbridge->name, &s_ip6, flow->dl_src);
+            }
         }
     }
 

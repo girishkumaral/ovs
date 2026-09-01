@@ -957,3 +957,118 @@ AT_CHECK([grep -q "GENEVE_ACT" stdout])
 
 OVS_VSWITCHD_STOP
 AT_CLEANUP
+
+AT_SETUP([tunnel_push_pop_ipv6 - neigh snoop on-link vs routed])
+OVS_VSWITCHD_START([add-port br0 p0 -- set Interface p0 type=dummy ofport_request=1 other-config:hwaddr=aa:55:aa:55:00:00])
+AT_CHECK([ovs-vsctl add-br int-br -- set bridge int-br datapath_type=dummy])
+AT_CHECK([ovs-vsctl add-port int-br t1 -- set Interface t1 type=vxlan \
+                       options:remote_ip=2001:cafe::92 options:key=123 ofport_request=2 \
+                    -- add-port int-br t2 -- set Interface t2 type=vxlan \
+                       options:remote_ip=2001:db8:1::92 options:key=123 ofport_request=3])
+
+dnl On-link underlay for 2001:cafe::/64.  Routed VTEP 2001:db8:1::92 via
+dnl 2001:cafe::1.
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:cafe::88/64], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:1::/64 br0 2001:cafe::1], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:cafe::92], [0], [src 2001:cafe::88
+gateway ::
+dev br0
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:db8:1::92], [0], [src 2001:cafe::88
+gateway 2001:cafe::1
+dev br0
+])
+
+AT_CHECK([ovs-ofctl add-flow br0 action=normal])
+AT_CHECK([ovs-appctl tnl/neigh/set br0 2001:cafe::92 aa:bb:cc:00:00:01], [0], [OK
+])
+AT_CHECK([ovs-appctl tnl/neigh/set br0 2001:db8:1::92 aa:bb:cc:00:00:02], [0], [OK
+])
+
+dnl On-link: data packet must still update tnl-neigh (BFD after NIC MAC change).
+AT_CHECK([ovs-appctl revalidator/purge])
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'aa55aa550000f8bc1244cafe86dd60000000003a11402001cafe0000000000000000000000922001cafe000000000000000000000088c85312b5003abc700c00000300007b00ffffffffffff00000000000008004500001c0001000040117cce7f0000017f0000010035003500080172'])
+AT_CHECK([ovs-appctl tnl/neigh/show | grep 2001:cafe::92], [0], [dnl
+2001:cafe::92                                 f8:bc:12:44:ca:fe   br0
+])
+
+dnl Routed: flapping last-hop MAC must not overwrite the VTEP neigh entry.
+AT_CHECK([ovs-appctl revalidator/purge])
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'aa55aa550000f8bc1244cafe86dd60000000003a114020010db80001000000000000000000922001cafe000000000000000000000088c85312b5003a79b60c00000300007b00ffffffffffff00000000000008004500001c0001000040117cce7f0000017f0000010035003500080172'])
+AT_CHECK([ovs-appctl tnl/neigh/show | grep 2001:db8:1::92], [0], [dnl
+2001:db8:1::92                                aa:bb:cc:00:00:02   br0
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([tunnel_push_pop_ipv6 - neigh snoop on-link other bridge])
+OVS_VSWITCHD_START([add-port br0 p0 -- set Interface p0 type=dummy ofport_request=1 other-config:hwaddr=aa:55:aa:55:00:00])
+AT_CHECK([ovs-vsctl add-br br1 -- set bridge br1 datapath_type=dummy])
+AT_CHECK([ovs-vsctl add-br int-br -- set bridge int-br datapath_type=dummy])
+AT_CHECK([ovs-vsctl add-port int-br t1 -- set Interface t1 type=vxlan \
+                       options:remote_ip=2001:db8:2::92 options:key=123 ofport_request=2])
+
+dnl Remote 2001:db8:2::92 is on-link on br1, not on receiving bridge br0.
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:cafe::88/64], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br1 2001:db8:2::88/64], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:db8:2::92 src=2001:cafe::88], [0], [src 2001:cafe::88
+gateway ::
+dev br1
+])
+
+AT_CHECK([ovs-ofctl add-flow br0 action=normal])
+AT_CHECK([ovs-appctl tnl/neigh/set br0 2001:db8:2::92 aa:bb:cc:00:00:03], [0], [OK
+])
+
+AT_CHECK([ovs-appctl revalidator/purge])
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'aa55aa550000f8bc1244cafe86dd60000000003a114020010db80002000000000000000000922001cafe000000000000000000000088c85312b5003a79b50c00000300007b00ffffffffffff00000000000008004500001c0001000040117cce7f0000017f0000010035003500080172'])
+AT_CHECK([ovs-appctl tnl/neigh/show | grep 2001:db8:2::92], [0], [dnl
+2001:db8:2::92                                aa:bb:cc:00:00:03   br0
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([tunnel_push_pop_ipv6 - neigh snoop policy routed])
+OVS_VSWITCHD_START([add-port br0 p0 -- set Interface p0 type=dummy ofport_request=1 other-config:hwaddr=aa:55:aa:55:00:00])
+AT_CHECK([ovs-vsctl add-br int-br -- set bridge int-br datapath_type=dummy])
+AT_CHECK([ovs-vsctl add-port int-br t1 -- set Interface t1 type=vxlan \
+                       options:remote_ip=2001:db8:3::92 options:key=123 ofport_request=2])
+
+dnl Main table: 2001:db8:3::/64 on-link (second address on br0).  From
+dnl the local VTEP 2001:cafe::88, table 10 reaches it via a gateway.
+dnl Learning must use the outer destination as src.
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:cafe::88/64], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:db8:3::88/64], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:3::/64 br0 2001:cafe::1 table=10], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/add -6 from=2001:cafe::88/128 table=10], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:db8:3::92], [0], [src 2001:db8:3::88
+gateway ::
+dev br0
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:db8:3::92 src=2001:cafe::88], [0], [src 2001:cafe::88
+gateway 2001:cafe::1
+dev br0
+])
+
+AT_CHECK([ovs-ofctl add-flow br0 action=normal])
+AT_CHECK([ovs-appctl tnl/neigh/set br0 2001:db8:3::92 aa:bb:cc:00:00:04], [0], [OK
+])
+
+AT_CHECK([ovs-appctl revalidator/purge])
+AT_CHECK([ovs-appctl netdev-dummy/receive p0 'aa55aa550000f8bc1244cafe86dd60000000003a114020010db80003000000000000000000922001cafe000000000000000000000088c85312b5003a79b40c00000300007b00ffffffffffff00000000000008004500001c0001000040117cce7f0000017f0000010035003500080172'])
+AT_CHECK([ovs-appctl tnl/neigh/show | grep 2001:db8:3::92], [0], [dnl
+2001:db8:3::92                                aa:bb:cc:00:00:04   br0
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP

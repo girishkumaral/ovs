@@ -1,5 +1,15 @@
 Post-v4.0.0
 --------------------
+   - Userspace datapath:
+     * Native tunnel neighbor learning from encapsulated data packets
+       now ignores the outer Ethernet source unless the remote VTEP is
+       on-link through the receiving bridge.  Routed last-hop MACs,
+       and remotes on-link on a different bridge, caused cache flaps
+       and revalidator storms.  The lookup uses the packet's outer
+       destination as the return-route source so source-based routing
+       is honored.  On-link VTEPs on the receiving bridge still
+       update the cache so BFD can recover after a remote NIC MAC
+       change.
 
 
 v4.0.0 - 17 Aug 2026

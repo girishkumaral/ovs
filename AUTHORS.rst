@@ -201,6 +201,7 @@ Gal Sagie                          gal.sagie@gmail.com
 Genevieve LEsperance               glesperance@pivotal.io
 Geoffrey Wossum                    gwossum@acm.org
 Gianluca Merlo                     gianluca.merlo@gmail.com
+Girish Kumar                       2girishkumar@gmail.com
 Giuseppe Lettieri                  g.lettieri@iet.unipi.it
 Glen Gibb                          grg@stanford.edu
 Gowrishankar Muthukrishnan         gmuthukr@redhat.com
